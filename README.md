@@ -4,6 +4,12 @@ A single-file, browser-based web application that lets you upload, view, and lis
 
 ---
 
+## 🌐 Live Demo
+
+👉 **Try it here:** [https://siddth09.github.io/pdf-reader-app/](https://siddth09.github.io/pdf-reader-app/)
+
+---
+
 ## 🚀 Features
 
 * **PDF Upload:** Load any PDF file from your local computer.
