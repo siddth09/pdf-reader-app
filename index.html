@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Reader with TTS</title>
+    <!-- 1. Load Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 2. Load PDF.js library -->
+    <!-- This is the main library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <!-- This is the "worker" file that helps PDF.js process the file in the background -->
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+    </script>
+    
+    <style>
+        /* Custom styles */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Style for the canvas container to give it a paper-like shadow */
+        #canvas-container {
+            max-width: 90vw; /* Limit width on large screens */
+            width: 800px;     /* Default width */
+        }
+        /* Ensure canvas is responsive */
+        #pdf-canvas {
+            width: 100%;
+            height: auto;
+        }
+    </style>
+</head>
+<body class="bg-gray-800 text-gray-100 flex flex-col items-center min-h-screen p-4">
+
+    <h1 class="text-3xl font-bold mb-6 text-white">PDF Page Reader</h1>
+
+    <!-- Controls Bar -->
+    <div class="w-full max-w-4xl bg-gray-900 p-4 rounded-lg shadow-xl mb-6 flex flex-wrap items-center justify-center gap-4">
+        
+        <!-- File Upload -->
+        <label for="pdf-upload" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300 cursor-pointer shadow-md">
+            Upload PDF
+        </label>
+        <input type="file" id="pdf-upload" class="hidden" accept="application/pdf">
+
+        <!-- Page Navigation -->
+        <div class="flex items-center gap-2">
+            <button id="prev-page" class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg transition duration-300 shadow-md disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                &larr; Prev
+            </button>
+            <span class="text-lg font-semibold px-2">
+                Page <span id="page-num">0</span> of <span id="page-count">0</span>
+            </span>
+            <button id="next-page" class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg transition duration-300 shadow-md disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                Next &rarr;
+            </button>
+        </div>
+
+        <!-- TTS Controls -->
+        <div class="flex items-center gap-2">
+             <button id="read-button" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300 shadow-md disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                Read This Page
+            </button>
+            <button id="stop-button" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300 shadow-md disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                Stop Reading
+            </button>
+        </div>
+    </div>
+
+    <!-- PDF Display Area -->
+    <div id="canvas-container" class="bg-white rounded-lg shadow-2xl overflow-hidden mb-6">
+        <canvas id="pdf-canvas"></canvas>
+    </div>
+
+    <!-- Status/Message Box -->
+    <div id="status-message" class="mt-4 text-lg text-yellow-300 h-6"></div>
+
+    <!-- Message Modal (for errors) -->
+    <div id="message-box" class="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-red-700 text-white p-6 rounded-lg shadow-xl z-50 hidden transition-all duration-300 max-w-sm w-full">
+        <h3 id="message-title" class="text-xl font-bold mb-2">Error</h3>
+        <p id="message-body">Something went wrong.</p>
+        <button id="message-close" class="mt-4 bg-red-800 hover:bg-red-900 text-white font-bold py-2 px-4 rounded-lg w-full">
+            Close
+        </button>
+    </div>
+    <div id="message-overlay" class="fixed inset-0 bg-black bg-opacity-50 z-40 hidden"></div>
+
+
+    <script>
+        // --- Global Variables ---
+        let pdfDoc = null;
+        let pageNum = 1;
+        let pageRendering = false;
+        let pageNumPending = null;
+        const scale = 1.8; // Higher scale for better quality
+        
+        // --- New TTS-related Global Variables ---
+        let femaleVoice = null;         // To store the preferred female voice
+        let lastSpokenCharIndex = 0;  // To track reading position
+        let currentPageText = '';       // To store the text of the current page
+        
+        // --- DOM Elements ---
+        const canvas = document.getElementById('pdf-canvas');
+        const ctx = canvas.getContext('2d');
+        const fileInput = document.getElementById('pdf-upload');
+        const pageNumDisplay = document.getElementById('page-num');
+        const pageCountDisplay = document.getElementById('page-count');
+        const prevPageButton = document.getElementById('prev-page');
+        const nextPageButton = document.getElementById('next-page');
+        const readButton = document.getElementById('read-button');
+        const stopButton = document.getElementById('stop-button');
+        const statusMessage = document.getElementById('status-message');
+        
+        // Message Box Elements
+        const messageBox = document.getElementById('message-box');
+        const messageOverlay = document.getElementById('message-overlay');
+        const messageTitle = document.getElementById('message-title');
+        const messageBody = document.getElementById('message-body');
+        const messageClose = document.getElementById('message-close');
+
+        // --- Web Speech API ---
+        const synth = window.speechSynthesis;
+
+        // --- New Function: Load and select a female voice ---
+        /**
+         * Loads available voices and tries to select an English female voice.
+         */
+        function loadVoices() {
+            const voices = synth.getVoices();
+            if (voices.length === 0) {
+                return; // Voices not ready yet
+            }
+
+            // Try to find a suitable voice
+            // Priority 1: "Female" in the name, English (US or GB)
+            femaleVoice = voices.find(voice => 
+                voice.lang.match(/en-(US|GB)/) && voice.name.includes('Female')
+            );
+            
+            // Priority 2: Known good female voices
+            if (!femaleVoice) {
+                femaleVoice = voices.find(voice => 
+                    voice.lang.match(/en-(US|GB)/) && (voice.name.includes('Zira') || voice.name.includes('Susan') || voice.name.includes('Google US English'))
+                );
+            }
+
+            // Priority 3: Any English (US or GB) voice
+            if (!femaleVoice) {
+                femaleVoice = voices.find(voice => voice.lang.match(/en-(US|GB)/));
+            }
+            
+            // Fallback: Just use the first available voice
+            if (!femaleVoice) {
+                femaleVoice = voices[0];
+            }
+        }
+
+        // --- New Function: Reset Speech UI State ---
+        /**
+         * Resets the UI controls related to speech synthesis.
+         */
+        function resetSpeechUI() {
+            statusMessage.textContent = '';
+            setControlsState(false); // Re-enable controls
+            if (pdfDoc) {
+                updateNavButtons(); // Update nav buttons based on page num
+            }
+            stopButton.disabled = true; // Disable stop button
+        }
+
+        // --- Core Functions ---
+
+        /**
+         * Renders a specific page of the PDF.
+         * @param {number} num - The page number to render.
+         */
+        function renderPage(num) {
+            pageRendering = true;
+            statusMessage.textContent = 'Rendering page...';
+
+            // Get the page
+            pdfDoc.getPage(num).then(function(page) {
+                const viewport = page.getViewport({ scale: scale });
+                canvas.height = viewport.height;
+                canvas.width = viewport.width;
+
+                // Render PDF page into canvas context
+                const renderContext = {
+                    canvasContext: ctx,
+                    viewport: viewport
+                };
+                
+                const renderTask = page.render(renderContext);
+
+                // Wait for rendering to finish
+                renderTask.promise.then(function() {
+                    pageRendering = false;
+                    statusMessage.textContent = ''; // Clear status
+                    pageNumDisplay.textContent = num;
+                    
+                    // Check if another page was requested while rendering
+                    if (pageNumPending !== null) {
+                        renderPage(pageNumPending);
+                        pageNumPending = null;
+                    }
+                });
+            }).catch(handleError);
+        }
+
+        /**
+         * Queues a page render. If already rendering, it waits.
+         * @param {number} num - The page number to queue.
+         */
+        function queueRenderPage(num) {
+            if (pageRendering) {
+                pageNumPending = num;
+            } else {
+                renderPage(num);
+            }
+        }
+
+        /**
+         * Disables or enables UI controls.
+         * @param {boolean} state - True to disable, false to enable.
+         */
+        function setControlsState(state) {
+            prevPageButton.disabled = state;
+            nextPageButton.disabled = state;
+            readButton.disabled = state;
+            stopButton.disabled = state;
+        }
+
+        /**
+         * Updates the enabled/disabled state of page navigation buttons.
+         */
+        function updateNavButtons() {
+            prevPageButton.disabled = (pageNum <= 1);
+            nextPageButton.disabled = (pageNum >= pdfDoc.numPages);
+        }
+
+        /**
+         * Handles loading the PDF file from the file input.
+         * @param {Event} e - The file input change event.
+         */
+        function handleFileSelect(e) {
+            const file = e.target.files[0];
+            if (!file || file.type !== 'application/pdf') {
+                showMessage('Invalid File', 'Please select a PDF file.');
+                return;
+            }
+
+            // Stop any speech
+            stopReading();
+            
+            // Reset resume state for new file
+            lastSpokenCharIndex = 0;
+            currentPageText = '';
+            
+            statusMessage.textContent = 'Loading PDF...';
+            setControlsState(true); // Disable controls while loading
+
+            const fileReader = new FileReader();
+            fileReader.onload = function() {
+                const typedarray = new Uint8Array(this.result);
+
+                // Load the PDF document
+                pdfjsLib.getDocument(typedarray).promise.then(function(doc) {
+                    pdfDoc = doc;
+                    pageCountDisplay.textContent = pdfDoc.numPages;
+                    pageNum = 1;
+                    
+                    renderPage(pageNum);
+                    updateNavButtons(); // Update nav state
+                    setControlsState(false); // Enable controls
+                    stopButton.disabled = true; // Stop button only enabled when speaking
+                    
+                }).catch(handleError);
+            };
+            fileReader.readAsArrayBuffer(file);
+        }
+
+        /**
+         * Extracts text from the current page and reads it aloud.
+         */
+        function readCurrentPage() {
+            if (!pdfDoc || synth.speaking) {
+                return;
+            }
+            
+            stopReading(); // Clear any previous speech
+            statusMessage.textContent = 'Extracting text...';
+            setControlsState(true); // Disable controls during extraction
+
+            pdfDoc.getPage(pageNum).then(function(page) {
+                return page.getTextContent();
+            }).then(function(textContent) {
+                
+                let pageText = '';
+                if (textContent && textContent.items) {
+                    // Join all text items, adding a space
+                    pageText = textContent.items.map(item => item.str).join(' ');
+                }
+
+                if (pageText.trim().length === 0) {
+                    statusMessage.textContent = '';
+                    showMessage('No Text Found', 'Could not find any readable text on this page.');
+                    setControlsState(false); // Re-enable controls
+                    updateNavButtons();
+                    return;
+                }
+
+                // --- Resume Logic ---
+                // If the extracted text is different, we are on a new page or new PDF.
+                if (currentPageText !== pageText) {
+                    lastSpokenCharIndex = 0;    // Reset position
+                    currentPageText = pageText; // Store new text
+                }
+                
+                // Get the text to speak (either full or from the last index)
+                const textToSpeak = currentPageText.substring(lastSpokenCharIndex);
+                
+                if (textToSpeak.trim().length === 0) {
+                    statusMessage.textContent = 'Finished reading.';
+                    setControlsState(false);
+                    updateNavButtons();
+                    lastSpokenCharIndex = 0; // Reset for next time
+                    return;
+                }
+                
+                const utterance = new SpeechSynthesisUtterance(textToSpeak);
+                const baseOffset = lastSpokenCharIndex; // Store the offset
+
+                // --- Set Female Voice ---
+                if (femaleVoice) {
+                    utterance.voice = femaleVoice;
+                }
+                
+                // --- Update Event Handlers ---
+
+                // Track reading progress
+                utterance.onboundary = function(event) {
+                    // Update global index based on substring offset + event charIndex
+                    lastSpokenCharIndex = baseOffset + event.charIndex;
+                };
+
+                // When speech starts
+                utterance.onstart = function() {
+                    statusMessage.textContent = 'Reading page...';
+                    setControlsState(true); // Disable all controls
+                    stopButton.disabled = false; // Enable stop button
+                };
+
+                // When speech ends (naturally)
+                utterance.onend = function() {
+                    // If we reached the end, reset the index for next time
+                    if (lastSpokenCharIndex >= currentPageText.length - 10) { // 10-char buffer
+                        lastSpokenCharIndex = 0;
+                    }
+                    resetSpeechUI(); // Reset controls
+                };
+                
+                // Handle speech errors
+                utterance.onerror = function(event) {
+                    // Don't treat "interrupted" or "canceled" as a fatal error,
+                    // as this happens when we call synth.cancel() (e.g., by pressing "Stop").
+                    if (event.error === 'interrupted' || event.error === 'canceled') {
+                        console.log('Speech synthesis was ' + event.error);
+                        // The UI is already reset by our new stopReading() function
+                        return;
+                    }
+                    
+                    // For other, actual errors:
+                    statusMessage.textContent = '';
+                    handleError(event.error);
+                    resetSpeechUI(); // Reset controls
+                    lastSpokenCharIndex = 0; // Reset position on error
+                };
+
+                // Speak!
+                synth.speak(utterance);
+
+            }).catch(handleError);
+        }
+
+        /**
+         * Stops the text-to-speech synthesis.
+         */
+        function stopReading() {
+            if (synth.speaking) {
+                synth.cancel();
+            }
+            // Manually reset UI immediately instead of waiting for onend event
+            resetSpeechUI();
+        }
+
+        // --- Navigation ---
+        
+        function onPrevPage() {
+            if (pageNum <= 1) {
+                return;
+            }
+            stopReading();
+            // Reset resume index for new page
+            lastSpokenCharIndex = 0;
+            currentPageText = '';
+            
+            pageNum--;
+            queueRenderPage(pageNum);
+            updateNavButtons();
+        }
+
+        function onNextPage() {
+            if (pageNum >= pdfDoc.numPages) {
+                return;
+            }
+            stopReading();
+            // Reset resume index for new page
+            lastSpokenCharIndex = 0;
+            currentPageText = '';
+            
+            pageNum++;
+            queueRenderPage(pageNum);
+            updateNavButtons();
+        }
+        
+        // --- Error and Message Handling ---
+        
+        /**
+         * Generic error handler.
+         * @param {Error|string} err - The error object or message.
+         */
+        function handleError(err) {
+            console.error(err);
+            const message = err.message || err.toString();
+            showMessage('An Error Occurred', `Details: ${message}`);
+            // Reset UI state
+            resetSpeechUI(); // Use our new reset function
+            lastSpokenCharIndex = 0; // Reset index on error
+        }
+        
+        /**
+         * Shows the modal message box.
+         * @param {string} title - The title for the message box.
+         * @param {string} body - The body text for the message box.
+         */
+        function showMessage(title, body) {
+            messageTitle.textContent = title;
+            messageBody.textContent = body;
+            messageBox.classList.remove('hidden');
+            messageOverlay.classList.remove('hidden');
+        }
+
+        /**
+         * Hides the modal message box.
+         */
+        function closeMessage() {
+            messageBox.classList.add('hidden');
+            messageOverlay.classList.add('hidden');
+        }
+
+
+
+        // --- Event Listeners ---
+        fileInput.addEventListener('change', handleFileSelect);
+        prevPageButton.addEventListener('click', onPrevPage);
+        nextPageButton.addEventListener('click', onNextPage);
+        readButton.addEventListener('click', readCurrentPage);
+        stopButton.addEventListener('click', stopReading);
+        messageClose.addEventListener('click', closeMessage);
+        messageOverlay.addEventListener('click', closeMessage);
+
+        // Stop speech if user closes the window/tab
+        window.addEventListener('beforeunload', stopReading);
+
+        // --- Load Voices ---
+        // Load voices when they are ready
+        synth.onvoiceschanged = loadVoices;
+        // Also try to load them immediately
+        loadVoices();
+
+    </script>
+</body>
+</html>
+
