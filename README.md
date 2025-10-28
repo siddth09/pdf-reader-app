@@ -2,6 +2,7 @@
 
 A single-file, browser-based web application that lets you upload, view, and listen to PDF pages through your browser's built-in text-to-speech (TTS) capabilities.
 
+[![Live App](https://img.shields.io/badge/🔗_Open%20Live%20App-Click%20Here-blue?style=for-the-badge)](https://siddth09.github.io/pdf-reader-app/)
 ---
 
 ## 🌐 Live Demo
